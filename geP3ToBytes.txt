@@ -1,0 +1,84 @@
+fileprivate func geP3ToBytes(_ s: inout Data, _ h: GeP3) {
+    // Compute (x/z, y/z) then encode y and sign of x
+    var zInv = FieldElement(); feInvert(&zInv, h.Z)
+    var x = FieldElement(); var y = FieldElement()
+    feMul(&x, h.X, zInv)
+    feMul(&y, h.Y, zInv)
+
+    // --- pack y ---
+    // copy limbs and normalize carries (ref10-style)
+    var t = [Int64](repeating: 0, count: 10)
+    for i in 0..<10 { t[i] = y[i] }
+
+    var carry: Int64 = 0
+    carry = (t[0] + (1 << 25)) >> 26; t[1] += carry; t[0] -= carry << 26
+    carry = (t[1] + (1 << 24)) >> 25; t[2] += carry; t[1] -= carry << 25
+    carry = (t[2] + (1 << 25)) >> 26; t[3] += carry; t[2] -= carry << 26
+    carry = (t[3] + (1 << 24)) >> 25; t[4] += carry; t[3] -= carry << 25
+    carry = (t[4] + (1 << 25)) >> 26; t[5] += carry; t[4] -= carry << 26
+    carry = (t[5] + (1 << 24)) >> 25; t[6] += carry; t[5] -= carry << 25
+    carry = (t[6] + (1 << 25)) >> 26; t[7] += carry; t[6] -= carry << 26
+    carry = (t[7] + (1 << 24)) >> 25; t[8] += carry; t[7] -= carry << 25
+    carry = (t[8] + (1 << 25)) >> 26; t[9] += carry; t[8] -= carry << 26
+    carry = (t[9] + (1 << 24)) >> 25; t[0] += carry * 19; t[9] -= carry << 25
+    carry = (t[0] + (1 << 25)) >> 26; t[1] += carry; t[0] -= carry << 26
+
+    // Masks matching ref10 bit widths
+    let m26: Int64 = (1 << 26) - 1   // 0x3ffffff
+    let m25: Int64 = (1 << 25) - 1   // 0x1ffffff
+
+    // Safely build the 8 32-bit words by masking the limbs, then combine using UInt64
+    let w0 = UInt64(bitPattern: Int64(t[0] & m26)) | (UInt64(bitPattern: Int64(t[1] & m25)) << 26)
+    let w1 = UInt64(bitPattern: Int64((t[1] >> 6) & m26)) | (UInt64(bitPattern: Int64(t[2] & m25)) << 19)
+    let w2 = UInt64(bitPattern: Int64((t[2] >> 13) & m26)) | (UInt64(bitPattern: Int64(t[3] & m25)) << 13)
+    let w3 = UInt64(bitPattern: Int64((t[3] >> 19) & m26)) | (UInt64(bitPattern: Int64(t[4] & m25)) << 6)
+    let w4 = UInt64(bitPattern: Int64(t[5] & m26)) | (UInt64(bitPattern: Int64(t[6] & m25)) << 25)
+    let w5 = UInt64(bitPattern: Int64((t[6] >> 7) & m26)) | (UInt64(bitPattern: Int64(t[7] & m25)) << 19)
+    let w6 = UInt64(bitPattern: Int64((t[7] >> 13) & m26)) | (UInt64(bitPattern: Int64(t[8] & m25)) << 13)
+    let w7 = UInt64(bitPattern: Int64((t[8] >> 19) & m26)) | (UInt64(bitPattern: Int64(t[9] & m25)) << 6)
+
+    var sBytes = [UInt8](repeating: 0, count: 32)
+    func store32(_ v: UInt64, _ offset: Int) {
+        sBytes[offset + 0] = UInt8(v & 0xff)
+        sBytes[offset + 1] = UInt8((v >> 8) & 0xff)
+        sBytes[offset + 2] = UInt8((v >> 16) & 0xff)
+        sBytes[offset + 3] = UInt8((v >> 24) & 0xff)
+    }
+    store32(w0, 0)
+    store32(w1, 4)
+    store32(w2, 8)
+    store32(w3, 12)
+    store32(w4, 16)
+    store32(w5, 20)
+    store32(w6, 24)
+    store32(w7, 28)
+
+    // --- pack x LSB for sign ---
+    var xt = [Int64](repeating: 0, count: 10)
+    for i in 0..<10 { xt[i] = x[i] }
+
+    // normalize x limbs similarly
+    carry = (xt[0] + (1 << 25)) >> 26; xt[1] += carry; xt[0] -= carry << 26
+    carry = (xt[1] + (1 << 24)) >> 25; xt[2] += carry; xt[1] -= carry << 25
+    carry = (xt[2] + (1 << 25)) >> 26; xt[3] += carry; xt[2] -= carry << 26
+    carry = (xt[3] + (1 << 24)) >> 25; xt[4] += carry; xt[3] -= carry << 25
+    carry = (xt[4] + (1 << 25)) >> 26; xt[5] += carry; xt[4] -= carry << 26
+    carry = (xt[5] + (1 << 24)) >> 25; xt[6] += carry; xt[5] -= carry << 25
+    carry = (xt[6] + (1 << 25)) >> 26; xt[7] += carry; xt[6] -= carry << 26
+    carry = (xt[7] + (1 << 24)) >> 25; xt[8] += carry; xt[7] -= carry << 25
+    carry = (xt[8] + (1 << 25)) >> 26; xt[9] += carry; xt[8] -= carry << 26
+    carry = (xt[9] + (1 << 24)) >> 25; xt[0] += carry * 19; xt[9] -= carry << 25
+    carry = (xt[0] + (1 << 25)) >> 26; xt[1] += carry; xt[0] -= carry << 26
+
+    let wx0 = UInt64(bitPattern: Int64(xt[0] & m26)) | (UInt64(bitPattern: Int64(xt[1] & m25)) << 26)
+    // We only need the least significant bit of x; easiest is to extract from wx0's lowest byte:
+    let xLSB = UInt8(wx0 & 1)
+
+    if xLSB != 0 {
+        sBytes[31] |= 0x80
+    } else {
+        sBytes[31] &= 0x7F
+    }
+
+    s = Data(sBytes)
+}
